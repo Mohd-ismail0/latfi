@@ -1,0 +1,495 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------
+// Enums (locked vocabulary)
+// -----------------------------
+
+enum Platform {
+  X
+  INSTAGRAM
+  FACEBOOK
+  LINKEDIN
+  WHATSAPP
+  EMAIL
+  REDDIT
+  SNAPCHAT
+  // Future: PHONE_CALL
+}
+
+enum ChannelAuthMethod {
+  OAUTH
+  API_KEY
+  WEBHOOK
+}
+
+enum ChannelStatus {
+  ACTIVE
+  DISABLED
+  ERROR
+}
+
+enum TimelineEventType {
+  MESSAGE
+  POST
+  COMMENT
+  LIKE
+  REACTION
+  CALL
+  SYSTEM
+  AI
+}
+
+enum TimelineDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum ContactScope {
+  BRAND_VISIBLE
+  USER_PRIVATE
+}
+
+enum ContactIdentityType {
+  EMAIL
+  LINKEDIN
+  X
+  WHATSAPP
+  PHONE
+}
+
+enum WorkflowTrigger {
+  NEW_INBOUND_MESSAGE
+  NEW_COMMENT
+  INACTIVITY
+  MANUAL
+}
+
+enum WorkflowStepKind {
+  AI
+  SYSTEM
+}
+
+// -----------------------------
+// Core multi-tenant entities
+// -----------------------------
+
+model Org {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+
+  users  User[]
+  brands Brand[]
+
+  // CRM
+  contacts Contact[]
+
+  @@index([createdAt])
+}
+
+model User {
+  id        String   @id @default(cuid())
+  orgId     String
+  email     String
+  createdAt DateTime @default(now())
+
+  org     Org          @relation(fields: [orgId], references: [id], onDelete: Restrict)
+  profile UserProfile?
+
+  // Private contacts live under the user.
+  privateContacts Contact[] @relation("UserPrivateContacts")
+
+  // Reply locking attribution
+  replyLocks ReplyLock[]
+
+  @@unique([orgId, email])
+  @@index([orgId, createdAt])
+}
+
+model UserProfile {
+  userId      String @id
+  displayName String
+  designation String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Brand {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  createdAt DateTime @default(now())
+
+  org Org @relation(fields: [orgId], references: [id], onDelete: Restrict)
+
+  channels          Channel[]
+  conversations     Conversation[]
+  timeline          TimelineEvent[]
+  interactionEvents InteractionEvent[]
+  replyLocks        ReplyLock[]
+  workflows         Workflow[]
+  assets            BrandAsset[]
+  characters        Character[]
+
+  // CRM visibility join
+  contactLinks ContactBrand[]
+
+  @@unique([orgId, name])
+  @@index([orgId, createdAt])
+}
+
+// -----------------------------
+// Channels / Integrations
+// -----------------------------
+
+model Channel {
+  id         String            @id @default(cuid())
+  brandId    String
+  platform   Platform
+  nickname   String
+  authMethod ChannelAuthMethod
+  status     ChannelStatus     @default(ACTIVE)
+
+  // Encrypted credentials blob (envelope-encrypted).
+  credentialsEncrypted Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand Brand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  events TimelineEvent[]
+
+  @@unique([brandId, platform, nickname])
+  @@index([brandId, platform])
+}
+
+// -----------------------------
+// CRM: Contacts + Identities
+// -----------------------------
+
+model Contact {
+  id    String @id @default(cuid())
+  orgId String
+
+  // "unknown" for auto-created contacts by default.
+  primaryRole String @default("unknown")
+
+  // Optional fields per requirements.
+  org        String?
+  department String?
+
+  scope       ContactScope @default(BRAND_VISIBLE)
+  ownerUserId String?
+
+  createdAt DateTime @default(now())
+
+  orgEntity Org   @relation(fields: [orgId], references: [id], onDelete: Restrict)
+  ownerUser User? @relation("UserPrivateContacts", fields: [ownerUserId], references: [id], onDelete: Restrict)
+
+  roles      ContactRole[]
+  identities ContactIdentity[]
+
+  // Current mapping to conversations is mutable (events never change).
+  conversationLinks ConversationContact[]
+
+  // Brand visibility
+  brands ContactBrand[]
+
+  // Events may reference a contact captured at ingestion time.
+  timelineEvents TimelineEvent[]
+
+  interactionEvents InteractionEvent[]
+
+  @@index([orgId, createdAt])
+  @@index([orgId, scope])
+}
+
+model ContactRole {
+  id        String @id @default(cuid())
+  contactId String
+  role      String
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, role])
+  @@index([role])
+}
+
+model ContactIdentity {
+  id              String              @id @default(cuid())
+  orgId           String
+  contactId       String
+  type            ContactIdentityType
+  value           String
+  normalizedValue String
+  createdAt       DateTime            @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, type, normalizedValue])
+  @@index([contactId, type])
+}
+
+model ContactBrand {
+  id        String   @id @default(cuid())
+  contactId String
+  brandId   String
+  createdAt DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  brand   Brand   @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, brandId])
+  @@index([brandId, createdAt])
+}
+
+// -----------------------------
+// Conversation graph + timelines (append-only)
+// -----------------------------
+
+model Conversation {
+  id        String   @id @default(cuid())
+  brandId   String
+  createdAt DateTime @default(now())
+
+  brand  Brand           @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  events TimelineEvent[]
+
+  // Mutable mapping (re-mapping conversations is allowed).
+  contacts ConversationContact[]
+
+  // Reply locking.
+  replyLock ReplyLock?
+
+  @@index([brandId, createdAt])
+}
+
+model ConversationContact {
+  id             String   @id @default(cuid())
+  conversationId String
+  contactId      String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contact      Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, contactId])
+  @@index([contactId, createdAt])
+}
+
+// Append-only, immutable. Corrections = new event.
+model TimelineEvent {
+  id             String   @id @default(cuid())
+  brandId        String
+  conversationId String
+  contactId      String?
+  channelId      String
+  platform       Platform
+
+  type      TimelineEventType
+  direction TimelineDirection
+
+  // All message/content fields are stored encrypted per-event.
+  contentEncrypted    Json
+  rawPayloadEncrypted Json
+
+  // Optional for outbound only.
+  signature String?
+
+  // Adapter-level idempotency key (e.g., message id, comment id).
+  sourceId String?
+
+  timestamp DateTime
+  createdAt DateTime @default(now())
+
+  brand        Brand        @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contact      Contact?     @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  channel      Channel      @relation(fields: [channelId], references: [id], onDelete: Restrict)
+
+  media              MediaObject[]
+  interactionTargets InteractionEvent[] @relation("InteractionTarget")
+
+  @@unique([channelId, platform, sourceId])
+  @@index([brandId, conversationId, timestamp])
+  @@index([brandId, timestamp])
+  @@index([channelId, timestamp])
+}
+
+model MediaObject {
+  id      String @id @default(cuid())
+  eventId String
+
+  // Stored in S3-compatible storage.
+  bucket String
+  key    String
+
+  mimeType  String
+  sizeBytes Int
+  sha256    String
+
+  createdAt DateTime @default(now())
+
+  event TimelineEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([bucket, key])
+  @@index([eventId, createdAt])
+}
+
+// Lightweight tracking only for known contacts; no auto-create contacts here.
+model InteractionEvent {
+  id            String            @id @default(cuid())
+  contactId     String
+  brandId       String
+  platform      Platform
+  type          TimelineEventType
+  targetEventId String
+  timestamp     DateTime
+  createdAt     DateTime          @default(now())
+
+  contact Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  brand   Brand         @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  target  TimelineEvent @relation("InteractionTarget", fields: [targetEventId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, targetEventId, type, timestamp])
+  @@index([brandId, timestamp])
+  @@index([contactId, timestamp])
+}
+
+// -----------------------------
+// Concurrency: reply locking
+// -----------------------------
+
+model ReplyLock {
+  conversationId String   @id
+  brandId        String
+  lockedByUserId String
+  lastEventId    String
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  brand        Brand        @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  lockedByUser User         @relation(fields: [lockedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([brandId, expiresAt])
+}
+
+// -----------------------------
+// Workflows (minimal, AI assistive)
+// -----------------------------
+
+model Workflow {
+  id          String          @id @default(cuid())
+  brandId     String
+  trigger     WorkflowTrigger
+  autoExecute Boolean         @default(false)
+
+  // Steps are metadata-first and stored as JSON:
+  // [{ kind: "AI" | "SYSTEM", ... }]
+  steps Json
+
+  createdAt DateTime @default(now())
+
+  brand Brand @relation(fields: [brandId], references: [id], onDelete: Cascade)
+
+  @@index([brandId, trigger])
+}
+
+// -----------------------------
+// Brand assets + characters (AI-ready)
+// -----------------------------
+
+model BrandAsset {
+  id        String   @id @default(cuid())
+  brandId   String
+  kind      String // logo, font, theme, design-system, media, etc.
+  name      String
+  createdAt DateTime @default(now())
+
+  brand    Brand               @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  versions BrandAssetVersion[]
+
+  @@unique([brandId, kind, name])
+  @@index([brandId, createdAt])
+}
+
+model BrandAssetVersion {
+  id       String @id @default(cuid())
+  assetId  String
+  version  Int
+  metadata Json
+
+  // Stored in S3-compatible storage.
+  bucket String
+  key    String
+
+  createdAt DateTime @default(now())
+
+  asset BrandAsset @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, version])
+  @@unique([bucket, key])
+  @@index([assetId, createdAt])
+}
+
+model Character {
+  id        String   @id @default(cuid())
+  brandId   String
+  name      String
+  createdAt DateTime @default(now())
+
+  brand    Brand              @relation(fields: [brandId], references: [id], onDelete: Cascade)
+  versions CharacterVersion[]
+
+  @@unique([brandId, name])
+  @@index([brandId, createdAt])
+}
+
+model CharacterVersion {
+  id          String @id @default(cuid())
+  characterId String
+  version     Int
+
+  // Training metadata, descriptors, etc.
+  metadata Json
+
+  createdAt DateTime @default(now())
+
+  character Character        @relation(fields: [characterId], references: [id], onDelete: Cascade)
+  assets    CharacterAsset[]
+
+  @@unique([characterId, version])
+  @@index([characterId, createdAt])
+}
+
+model CharacterAsset {
+  id                 String @id @default(cuid())
+  characterVersionId String
+  kind               String // image | video | voice | model3d | other
+  metadata           Json
+
+  bucket String
+  key    String
+
+  createdAt DateTime @default(now())
+
+  characterVersion CharacterVersion @relation(fields: [characterVersionId], references: [id], onDelete: Cascade)
+
+  @@unique([bucket, key])
+  @@index([characterVersionId, createdAt])
+}
