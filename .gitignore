@@ -77,6 +77,7 @@ web_modules/
 # Next.js build output
 .next
 out
+.vercel
 
 # Nuxt.js build / generate output
 .nuxt
@@ -137,3 +138,17 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+/src/generated/prisma
+
+# OS / editor
+.DS_Store
+.idea/
+
+# Local database dumps / exports
+*.sql
+*.dump
+
+# Local SSL keys / certs (never commit)
+*.pem
+*.key
